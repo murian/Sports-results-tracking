@@ -14,6 +14,11 @@ A modern, feature-rich fitness tracking application built with React, TypeScript
 ### 📸 Progress Photos
 - Upload front, side, and back photos
 - Compare photos side-by-side to visualize your progress
+- **AI-Powered Analysis** with Google Gemini 2.0 Flash:
+  - Select any two photo sets to compare
+  - Get detailed insights on body transformation
+  - Receive specific observations on muscle development, body composition changes
+  - Get personalized recommendations for continued progress
 - Track your visual transformation over time
 - Add notes to document your journey
 
@@ -57,6 +62,7 @@ A modern, feature-rich fitness tracking application built with React, TypeScript
 - **Recharts** - Beautiful data visualization
 - **Lucide React** - Modern icon library
 - **date-fns** - Date manipulation and formatting
+- **Google Gemini AI** - AI-powered photo analysis
 - **Web Bluetooth API** - Smart scale integration
 - **LocalStorage** - Client-side data persistence
 
@@ -110,6 +116,15 @@ Add and track detailed body measurements over time. All measurements are optiona
 
 ### Progress Photos
 Upload progress photos to visually document your transformation. Use the compare feature to see changes side-by-side.
+
+**AI Photo Analysis:**
+1. Click "AI Config" to set up your Google Gemini API key (free at [Google AI Studio](https://aistudio.google.com/apikey))
+2. Click "Compare" mode and select any 2 photo sets
+3. Click "Get AI Insights" to receive detailed analysis including:
+   - Overall body transformation assessment
+   - Specific changes in muscle development and body composition
+   - Personalized recommendations for continued progress
+4. AI uses Google Gemini 2.0 Flash for accurate, detailed analysis
 
 ### Smart Scale
 Connect your Bluetooth smart scale for automatic data syncing, or manually enter data from any smart scale.
