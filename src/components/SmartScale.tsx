@@ -54,13 +54,17 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
         return;
       }
 
-      // Request Bluetooth device
+      // Request Bluetooth device - accept all devices to show all available scales
       const device = await navigator.bluetooth.requestDevice({
-        filters: [
-          { services: ['battery_service'] },
-          { services: ['0000fff0-0000-1000-8000-00805f9b34fb'] }, // Common scale service UUID
-        ],
-        optionalServices: ['weight_scale', 'body_composition']
+        acceptAllDevices: true,
+        optionalServices: [
+          'weight_scale',
+          'body_composition',
+          'battery_service',
+          '0000fff0-0000-1000-8000-00805f9b34fb', // Common scale service
+          '0000181b-0000-1000-8000-00805f9b34fb', // Body Composition
+          '0000181d-0000-1000-8000-00805f9b34fb', // Weight Scale
+        ]
       });
 
       // Connect to GATT server
