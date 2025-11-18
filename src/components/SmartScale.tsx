@@ -54,9 +54,25 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
         return;
       }
 
-      // Request Bluetooth device - accept all devices to show all available scales
+      // Request Bluetooth device - filter for scale devices including CHWARES
       const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
+        filters: [
+          { namePrefix: 'CHWARES' },
+          { namePrefix: 'Chipsea' },
+          { namePrefix: 'QN-Scale' },
+          { namePrefix: 'Scale' },
+          { namePrefix: 'Weight' },
+          { namePrefix: 'BF' },
+          { namePrefix: 'Body' },
+          { namePrefix: 'Health' },
+          { namePrefix: 'Electronic' },
+          { namePrefix: 'Adoric' },
+          { namePrefix: 'RENPHO' },
+          { namePrefix: 'Eufy' },
+          { namePrefix: 'Yunmai' },
+          { namePrefix: 'FITINDEX' },
+          { namePrefix: 'IF' }, // Common scale prefix
+        ],
         optionalServices: [
           'weight_scale',
           'body_composition',
@@ -64,6 +80,7 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
           '0000fff0-0000-1000-8000-00805f9b34fb', // Common scale service
           '0000181b-0000-1000-8000-00805f9b34fb', // Body Composition
           '0000181d-0000-1000-8000-00805f9b34fb', // Weight Scale
+          '0000ffb0-0000-1000-8000-00805f9b34fb', // CHWARES/Chipsea custom service
         ]
       });
 
