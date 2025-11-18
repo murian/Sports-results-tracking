@@ -30,8 +30,26 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
     setIsConnecting(true);
     try {
       // Check if Web Bluetooth is available
-      if (!navigator.bluetooth) {
-        alert('Web Bluetooth is not supported in this browser. Please use Chrome, Edge, or Opera on desktop, or Chrome on Android.');
+      if (!('bluetooth' in navigator)) {
+        const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
+
+        let message = 'Web Bluetooth is not available.\n\n';
+
+        if (!isSecure) {
+          message += 'Reason: This page must be served over HTTPS.\n\n';
+        } else {
+          message += 'Possible reasons:\n';
+          message += '• Safari and iOS browsers do not support Web Bluetooth\n';
+          message += '• You may need to enable Bluetooth in browser settings\n\n';
+          message += 'For Chrome/Edge/Opera on macOS:\n';
+          message += '1. Go to chrome://flags (or edge://flags)\n';
+          message += '2. Search for "Web Bluetooth"\n';
+          message += '3. Enable the feature and restart browser\n\n';
+        }
+
+        message += 'Alternative: Use "Add Manually" to enter your scale data.';
+
+        alert(message);
         setIsConnecting(false);
         return;
       }
@@ -66,6 +84,8 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
       if (error instanceof Error) {
         if (error.name === 'NotFoundError') {
           alert('No Bluetooth device selected. Please try again.');
+        } else if (error.name === 'SecurityError') {
+          alert('Bluetooth access denied. Please ensure:\n\n1. Site is served over HTTPS\n2. Browser has Bluetooth permission\n3. System Bluetooth is enabled');
         } else {
           alert(`Failed to connect to scale: ${error.message}`);
         }
