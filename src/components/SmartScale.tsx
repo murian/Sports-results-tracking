@@ -13,6 +13,7 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
   const [isConnecting, setIsConnecting] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
+  const [lastWeight, setLastWeight] = useState<number | null>(null);
   const [formData, setFormData] = useState({
     date: format(new Date(), 'yyyy-MM-dd'),
     weight: '',
@@ -25,6 +26,40 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
     metabolicAge: '',
     proteinPercentage: '',
   });
+
+  // Chipsea/Fitdays scale service and characteristic UUIDs
+  const SCALE_SERVICE_UUID = '0000fff0-0000-1000-8000-00805f9b34fb';
+  const SCALE_NOTIFY_CHARACTERISTIC = '0000fff4-0000-1000-8000-00805f9b34fb';
+
+  const parseWeightData = (dataView: DataView): number | null => {
+    // Chipsea scales send weight data in different formats
+    // Common format: bytes contain weight in kg * 100 or * 10
+    try {
+      if (dataView.byteLength >= 2) {
+        // Try different byte positions and formats
+        const byte0 = dataView.getUint8(0);
+        const byte1 = dataView.getUint8(1);
+
+        // Check for stable measurement flag (often 0xCF or similar)
+        if (byte0 === 0xCF || byte0 === 0x10) {
+          // Weight is usually in bytes 3-4 or 4-5 as big-endian
+          if (dataView.byteLength >= 5) {
+            const weightRaw = dataView.getUint16(3, false); // Big-endian
+            return weightRaw / 100; // Convert to kg
+          }
+        }
+
+        // Alternative: weight in first two bytes
+        const weightRaw = (byte0 << 8) | byte1;
+        if (weightRaw > 0 && weightRaw < 30000) { // Reasonable weight range
+          return weightRaw / 100;
+        }
+      }
+    } catch (e) {
+      console.error('Error parsing weight data:', e);
+    }
+    return null;
+  };
 
   const connectToScale = async () => {
     setIsConnecting(true);
@@ -54,35 +89,19 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
         return;
       }
 
-      // Request Bluetooth device - filter for scale devices including CHWARES
+      // Request Bluetooth device - show all devices for Fitdays/Chipsea scales
+      // These scales often have generic names like "Electronic Scale" or "Chipsea-BLE"
       const device = await navigator.bluetooth.requestDevice({
-        filters: [
-          { namePrefix: 'CHWARES' },
-          { namePrefix: 'Chipsea' },
-          { namePrefix: 'QN-Scale' },
-          { namePrefix: 'Scale' },
-          { namePrefix: 'Weight' },
-          { namePrefix: 'BF' },
-          { namePrefix: 'Body' },
-          { namePrefix: 'Health' },
-          { namePrefix: 'Electronic' },
-          { namePrefix: 'Adoric' },
-          { namePrefix: 'RENPHO' },
-          { namePrefix: 'Eufy' },
-          { namePrefix: 'Yunmai' },
-          { namePrefix: 'FITINDEX' },
-          { namePrefix: 'IF' }, // Common scale prefix
-        ],
+        acceptAllDevices: true,
         optionalServices: [
-          'weight_scale',
-          'body_composition',
-          'battery_service',
-          '0000fff0-0000-1000-8000-00805f9b34fb', // Common scale service
-          '0000181b-0000-1000-8000-00805f9b34fb', // Body Composition
+          SCALE_SERVICE_UUID,
+          '0000ffe0-0000-1000-8000-00805f9b34fb', // Alternative service
           '0000181d-0000-1000-8000-00805f9b34fb', // Weight Scale
-          '0000ffb0-0000-1000-8000-00805f9b34fb', // CHWARES/Chipsea custom service
+          '0000181b-0000-1000-8000-00805f9b34fb', // Body Composition
         ]
       });
+
+      console.log('Selected device:', device.name);
 
       // Connect to GATT server
       const server = await device.gatt?.connect();
@@ -90,13 +109,54 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
         throw new Error('Failed to connect to GATT server');
       }
 
-      setIsConnected(true);
-      alert('Connected to smart scale! The app will automatically receive data when you step on the scale.');
+      // Try to get the scale service
+      let service;
+      try {
+        service = await server.getPrimaryService(SCALE_SERVICE_UUID);
+      } catch {
+        // Try alternative service UUIDs
+        try {
+          service = await server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb');
+        } catch {
+          throw new Error('Scale service not found. This device may not be a compatible scale.');
+        }
+      }
 
-      // Listen for weight measurements
-      // Note: This is a simplified example. Actual implementation would depend on your specific scale's protocol
+      // Get the notify characteristic to receive weight data
+      let notifyCharacteristic;
+      try {
+        notifyCharacteristic = await service.getCharacteristic(SCALE_NOTIFY_CHARACTERISTIC);
+      } catch {
+        // Try alternative characteristic
+        try {
+          notifyCharacteristic = await service.getCharacteristic('0000fff1-0000-1000-8000-00805f9b34fb');
+        } catch {
+          throw new Error('Weight characteristic not found.');
+        }
+      }
+
+      // Start notifications to receive weight data
+      await notifyCharacteristic.startNotifications();
+
+      notifyCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
+        const target = event.target as unknown as { value: DataView };
+        if (target?.value) {
+          console.log('Received data:', new Uint8Array(target.value.buffer));
+          const weight = parseWeightData(target.value);
+          if (weight && weight > 0 && weight < 300) {
+            setLastWeight(weight);
+            console.log('Weight:', weight, 'kg');
+          }
+        }
+      });
+
+      setIsConnected(true);
+      alert(`Connected to ${device.name || 'scale'}!\n\nStep on the scale to measure. The weight will appear on screen.`);
+
+      // Listen for disconnection
       device.addEventListener('gattserverdisconnected', () => {
         setIsConnected(false);
+        setLastWeight(null);
         alert('Disconnected from smart scale');
       });
 
@@ -108,11 +168,24 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
         } else if (error.name === 'SecurityError') {
           alert('Bluetooth access denied. Please ensure:\n\n1. Site is served over HTTPS\n2. Browser has Bluetooth permission\n3. System Bluetooth is enabled');
         } else {
-          alert(`Failed to connect to scale: ${error.message}`);
+          alert(`Failed to connect: ${error.message}\n\nTip: Make sure your scale is turned on (step on it briefly).`);
         }
       }
     } finally {
       setIsConnecting(false);
+    }
+  };
+
+  const saveLastWeight = () => {
+    if (lastWeight) {
+      const data: SmartScaleData = {
+        id: Date.now().toString(),
+        date: new Date(),
+        weight: lastWeight,
+      };
+      onAdd(data);
+      setLastWeight(null);
+      alert(`Saved weight: ${lastWeight} kg`);
     }
   };
 
@@ -187,11 +260,30 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
               Connect your Bluetooth-enabled smart scale to automatically sync your weight and body composition data.
             </p>
             <p className="text-gray-500 text-xs">
-              Supported on Chrome, Edge, and Opera browsers (desktop and Android). Make sure Bluetooth is enabled on your device.
+              Supported: CHWARES/Fitdays scales, Chipsea-based scales. Use Chrome, Edge, or Opera with HTTPS.
             </p>
           </div>
         </div>
       </div>
+
+      {/* Live Weight Display */}
+      {isConnected && (
+        <div className="card border-primary/50">
+          <div className="text-center">
+            <h3 className="text-lg font-semibold mb-2">Live Weight Reading</h3>
+            {lastWeight ? (
+              <>
+                <p className="text-5xl font-bold text-primary mb-4">{lastWeight.toFixed(1)} kg</p>
+                <button onClick={saveLastWeight} className="btn-primary">
+                  Save This Weight
+                </button>
+              </>
+            ) : (
+              <p className="text-gray-400">Step on your scale to see the weight...</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {showManualForm && (
         <div className="card">
