@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { Home, Activity, Camera, Scale, TrendingUp, Menu, X } from 'lucide-react';
+import { Home, Activity, Camera, Scale, TrendingUp, Menu, X, Cloud, CloudOff } from 'lucide-react';
 import type { ViewType, AppData } from './types';
-import { loadData, addMeasurement, addPhoto, addScaleData, deleteMeasurement, deletePhoto, deleteScaleData } from './utils/storage';
+import { loadData, addMeasurement, addPhoto, addScaleData, deleteMeasurement, deletePhoto, deleteScaleData, saveAllData } from './utils/storage';
+import { loadDataWithFallback, saveData, getSyncToken } from './utils/api';
 import Dashboard from './components/Dashboard';
 import Measurements from './components/Measurements';
 import Photos from './components/Photos';
@@ -12,10 +13,69 @@ function App() {
   const [currentView, setCurrentView] = useState<ViewType>('dashboard');
   const [data, setData] = useState<AppData>(loadData());
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isSynced, setIsSynced] = useState(false);
 
-  // Refresh data when it changes
+  // Load data from API on startup
+  useEffect(() => {
+    const initializeData = async () => {
+      try {
+        const syncToken = getSyncToken();
+        if (syncToken && syncToken !== 'default') {
+          const serverData = await loadDataWithFallback();
+          if (serverData) {
+            // Convert date strings back to Date objects
+            const processedData: AppData = {
+              measurements: serverData.measurements.map((m: any) => ({
+                ...m,
+                date: new Date(m.date)
+              })),
+              photos: serverData.photos.map((p: any) => ({
+                ...p,
+                date: new Date(p.date)
+              })),
+              scaleData: serverData.scaleData.map((s: any) => ({
+                ...s,
+                date: new Date(s.date)
+              }))
+            };
+            setData(processedData);
+            // Also save to localStorage for offline access
+            saveAllData(processedData);
+            setIsSynced(true);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load data from server:', error);
+      }
+    };
+
+    initializeData();
+  }, []);
+
+  // Sync data to server after changes
+  const syncToServer = async (newData: AppData) => {
+    const syncToken = getSyncToken();
+    if (syncToken && syncToken !== 'default') {
+      try {
+        await saveData('sync', {
+          measurements: newData.measurements,
+          photos: newData.photos,
+          scaleData: newData.scaleData,
+          settings: {}
+        });
+        setIsSynced(true);
+      } catch (error) {
+        console.error('Failed to sync to server:', error);
+        setIsSynced(false);
+      }
+    }
+  };
+
+  // Refresh data from localStorage and sync
   const refreshData = () => {
-    setData(loadData());
+    const newData = loadData();
+    setData(newData);
+    syncToServer(newData);
   };
 
   useEffect(() => {
@@ -52,7 +112,20 @@ function App() {
               </div>
               <div>
                 <h1 className="text-2xl font-bold text-primary">FitTrack Pro</h1>
-                <p className="text-xs text-gray-400">Your Fitness Journey</p>
+                <p className="text-xs text-gray-400 flex items-center gap-1">
+                  {getSyncToken() && getSyncToken() !== 'default' ? (
+                    <>
+                      {isSynced ? (
+                        <Cloud size={12} className="text-green-500" />
+                      ) : (
+                        <CloudOff size={12} className="text-orange-500" />
+                      )}
+                      <span>Synced</span>
+                    </>
+                  ) : (
+                    'Your Fitness Journey'
+                  )}
+                </p>
               </div>
             </div>
 
@@ -159,7 +232,9 @@ function App() {
         <div className="container mx-auto px-4 py-6 text-center text-gray-400 text-sm">
           <p>FitTrack Pro - Track your fitness journey with style</p>
           <p className="mt-2 text-xs">
-            All data is stored locally in your browser. Export regularly to backup your progress.
+            {getSyncToken() && getSyncToken() !== 'default'
+              ? 'Data syncs between web and iOS app using your sync token.'
+              : 'Set a sync token in Smart Scale settings to sync with the iOS app.'}
           </p>
         </div>
       </footer>

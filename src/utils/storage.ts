@@ -42,6 +42,9 @@ export const saveData = (data: AppData): void => {
   }
 };
 
+// Alias for saveData
+export const saveAllData = saveData;
+
 export const addMeasurement = (measurement: BodyMeasurement): void => {
   const data = loadData();
   data.measurements.push(measurement);
