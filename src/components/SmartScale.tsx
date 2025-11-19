@@ -53,41 +53,63 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
   // Parse weight from Chipsea scale advertisement data
   const parseChipseaWeight = (manufacturerData: Map<number, DataView>): number | null => {
     for (const [companyId, dataView] of manufacturerData) {
-      console.log(`Manufacturer ID: 0x${companyId.toString(16)}, Data:`, new Uint8Array(dataView.buffer));
+      const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+      console.log(`Manufacturer ID: 0x${companyId.toString(16)}, Length: ${bytes.length}, Data:`,
+        Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
-      // Try to parse weight from manufacturer data
-      if (dataView.byteLength >= 2) {
-        // Chipsea format: weight is often in bytes as (value * 100) in grams or kg
-        // Try different parsing strategies
+      // Chipsea protocol format:
+      // Byte 0: 0xCA - Magic identifier
+      // Byte 1: 0x20 - Protocol version (2.0)
+      // Byte 2: 0x0B - Data length
+      // Bytes 11-12: Weight value (little-endian, divide by 10)
 
-        // Strategy 1: Weight in bytes 0-1 (big endian) as kg * 100
-        let weight = dataView.getUint16(0, false) / 100;
+      // Check for Chipsea magic bytes
+      if (bytes.length >= 13 && bytes[0] === 0xCA && bytes[1] === 0x20) {
+        const weightRaw = bytes[11] | (bytes[12] << 8); // Little-endian
+        const weight = weightRaw / 10;
+        console.log(`Chipsea format detected! Raw: ${weightRaw}, Weight: ${weight} kg`);
+        if (weight > 0 && weight < 300) {
+          return weight;
+        }
+      }
+
+      // Alternative Chipsea format (some scales use different header)
+      if (bytes.length >= 6) {
+        // Try parsing from different positions
+
+        // Format 1: Weight at bytes 2-3 (little-endian, divide by 100)
+        let weight = (bytes[2] | (bytes[3] << 8)) / 100;
         if (weight > 20 && weight < 200) {
+          console.log(`Format 1: Weight ${weight} kg`);
           return weight;
         }
 
-        // Strategy 2: Weight in bytes 0-1 (little endian) as kg * 100
-        weight = dataView.getUint16(0, true) / 100;
+        // Format 2: Weight at bytes 0-1 (little-endian, divide by 10)
+        weight = (bytes[0] | (bytes[1] << 8)) / 10;
         if (weight > 20 && weight < 200) {
+          console.log(`Format 2: Weight ${weight} kg`);
           return weight;
         }
 
-        // Strategy 3: Look for weight in later bytes
-        if (dataView.byteLength >= 4) {
-          weight = dataView.getUint16(2, false) / 100;
+        // Format 3: Weight at bytes 4-5 (little-endian, divide by 10)
+        if (bytes.length >= 6) {
+          weight = (bytes[4] | (bytes[5] << 8)) / 10;
           if (weight > 20 && weight < 200) {
+            console.log(`Format 3: Weight ${weight} kg`);
             return weight;
           }
-          weight = dataView.getUint16(2, true) / 100;
-          if (weight > 20 && weight < 200) {
+        }
+      }
+
+      // Fallback: Try to find any reasonable weight value in the data
+      if (bytes.length >= 2) {
+        for (let i = 0; i < bytes.length - 1; i++) {
+          // Little-endian, divide by 10
+          const weight = (bytes[i] | (bytes[i + 1] << 8)) / 10;
+          if (weight >= 30 && weight <= 150) {
+            console.log(`Fallback at position ${i}: Weight ${weight} kg`);
             return weight;
           }
-        }
-
-        // Strategy 4: Weight as grams in bytes 0-1
-        weight = dataView.getUint16(0, true) / 1000;
-        if (weight > 20 && weight < 200) {
-          return weight;
         }
       }
     }
@@ -127,26 +149,59 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
       setScanStatus('Scanning... Step on your scale now!');
 
       // Listen for advertisement events
+      let deviceCount = 0;
       const handleAdvertisement = (event: Event) => {
         const advEvent = event as BluetoothAdvertisingEvent;
         const device = advEvent.device;
 
+        deviceCount++;
+
         // Log all devices for debugging
-        if (device.name || advEvent.manufacturerData?.size) {
-          console.log('Device found:', device.name || device.id, advEvent);
+        const hasManufacturerData = advEvent.manufacturerData && advEvent.manufacturerData.size > 0;
+        const hasServiceData = advEvent.serviceData && advEvent.serviceData.size > 0;
+
+        if (device.name || hasManufacturerData || hasServiceData) {
+          console.log(`[${deviceCount}] Device: ${device.name || 'Unknown'} (${device.id})`, {
+            rssi: advEvent.rssi,
+            hasManufacturerData,
+            hasServiceData
+          });
         }
 
-        // Check for Chipsea/CHWARES scale
-        // These scales often have no name or generic names
-        if (advEvent.manufacturerData && advEvent.manufacturerData.size > 0) {
-          const weight = parseChipseaWeight(advEvent.manufacturerData);
+        // Check for Chipsea/CHWARES scale in manufacturer data
+        if (hasManufacturerData) {
+          const weight = parseChipseaWeight(advEvent.manufacturerData!);
           if (weight) {
             setLastWeight(weight);
             setScanStatus(`Weight detected: ${weight.toFixed(1)} kg`);
-            console.log('Weight from advertisement:', weight);
+            console.log('Weight from manufacturer data:', weight);
+          }
+        }
+
+        // Also check service data (some scales use this)
+        if (hasServiceData) {
+          for (const [uuid, dataView] of advEvent.serviceData!) {
+            const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+            console.log(`Service UUID: ${uuid}, Data:`,
+              Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
+            // Try to parse weight from service data
+            if (bytes.length >= 2) {
+              for (let i = 0; i < bytes.length - 1; i++) {
+                const weight = (bytes[i] | (bytes[i + 1] << 8)) / 10;
+                if (weight >= 30 && weight <= 150) {
+                  setLastWeight(weight);
+                  setScanStatus(`Weight detected: ${weight.toFixed(1)} kg`);
+                  console.log('Weight from service data:', weight);
+                  break;
+                }
+              }
+            }
           }
         }
       };
+
+      console.log('BLE scan started, listening for advertisements...');
 
       (bluetooth as unknown as EventTarget).addEventListener('advertisementreceived', handleAdvertisement);
 
