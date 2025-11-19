@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react';
-import { Plus, Trash2, Calendar, Upload, FileText } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Plus, Trash2, Calendar, Smartphone, RefreshCw, Settings } from 'lucide-react';
 import type { SmartScaleData } from '../types';
 import { format } from 'date-fns';
 
@@ -12,8 +12,9 @@ interface SmartScaleProps {
 export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScaleProps) {
   const [showManualForm, setShowManualForm] = useState(false);
   const [importStatus, setImportStatus] = useState<string>('');
-  const [isImporting, setIsImporting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncToken, setSyncToken] = useState<string>('');
+  const [showSyncSettings, setShowSyncSettings] = useState(false);
   const [formData, setFormData] = useState({
     date: format(new Date(), 'yyyy-MM-dd'),
     weight: '',
@@ -27,163 +28,77 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
     proteinPercentage: '',
   });
 
-  // Parse Apple Health export XML for weight data
-  const parseAppleHealthExport = async (file: File): Promise<SmartScaleData[]> => {
-    const text = await file.text();
-    const parser = new DOMParser();
-    const xmlDoc = parser.parseFromString(text, 'text/xml');
-
-    // Check for parsing errors
-    const parseError = xmlDoc.querySelector('parsererror');
-    if (parseError) {
-      throw new Error('Invalid XML file. Please export your data from Apple Health.');
+  // Load sync token from localStorage
+  useEffect(() => {
+    const savedToken = localStorage.getItem('fitnessSyncToken');
+    if (savedToken) {
+      setSyncToken(savedToken);
     }
+  }, []);
 
-    const records: SmartScaleData[] = [];
-    const existingDates = new Set(scaleData.map(d => format(d.date, 'yyyy-MM-dd')));
-
-    // Find all weight records (HKQuantityTypeIdentifierBodyMass)
-    const weightRecords = xmlDoc.querySelectorAll('Record[type="HKQuantityTypeIdentifierBodyMass"]');
-
-    // Also check for body fat percentage
-    const bodyFatRecords = xmlDoc.querySelectorAll('Record[type="HKQuantityTypeIdentifierBodyFatPercentage"]');
-    const leanBodyMassRecords = xmlDoc.querySelectorAll('Record[type="HKQuantityTypeIdentifierLeanBodyMass"]');
-
-    // Group records by date
-    const recordsByDate = new Map<string, {
-      weight?: number;
-      bodyFat?: number;
-      leanMass?: number;
-      date: Date;
-    }>();
-
-    // Process weight records
-    weightRecords.forEach((record) => {
-      const value = parseFloat(record.getAttribute('value') || '0');
-      const unit = record.getAttribute('unit') || 'kg';
-      const startDate = record.getAttribute('startDate') || '';
-
-      if (value > 0 && startDate) {
-        // Parse date (format: "2024-01-01 10:00:00 +0000")
-        const date = new Date(startDate);
-        const dateKey = format(date, 'yyyy-MM-dd');
-
-        // Convert to kg if needed
-        let weightKg = value;
-        if (unit === 'lb') {
-          weightKg = value * 0.453592;
-        }
-
-        // Keep the most recent reading for each day
-        const existing = recordsByDate.get(dateKey);
-        if (!existing || date > existing.date) {
-          recordsByDate.set(dateKey, {
-            ...existing,
-            weight: weightKg,
-            date,
-          });
-        }
-      }
-    });
-
-    // Process body fat records
-    bodyFatRecords.forEach((record) => {
-      const value = parseFloat(record.getAttribute('value') || '0');
-      const startDate = record.getAttribute('startDate') || '';
-
-      if (value > 0 && startDate) {
-        const date = new Date(startDate);
-        const dateKey = format(date, 'yyyy-MM-dd');
-
-        // Body fat is stored as decimal (0.15 = 15%)
-        const bodyFatPercent = value < 1 ? value * 100 : value;
-
-        const existing = recordsByDate.get(dateKey);
-        if (existing) {
-          recordsByDate.set(dateKey, {
-            ...existing,
-            bodyFat: bodyFatPercent,
-          });
-        }
-      }
-    });
-
-    // Process lean body mass records
-    leanBodyMassRecords.forEach((record) => {
-      const value = parseFloat(record.getAttribute('value') || '0');
-      const unit = record.getAttribute('unit') || 'kg';
-      const startDate = record.getAttribute('startDate') || '';
-
-      if (value > 0 && startDate) {
-        const date = new Date(startDate);
-        const dateKey = format(date, 'yyyy-MM-dd');
-
-        let leanMassKg = value;
-        if (unit === 'lb') {
-          leanMassKg = value * 0.453592;
-        }
-
-        const existing = recordsByDate.get(dateKey);
-        if (existing) {
-          recordsByDate.set(dateKey, {
-            ...existing,
-            leanMass: leanMassKg,
-          });
-        }
-      }
-    });
-
-    // Convert to SmartScaleData format
-    recordsByDate.forEach((data, dateKey) => {
-      if (data.weight && !existingDates.has(dateKey)) {
-        records.push({
-          id: `apple-health-${dateKey}-${Date.now()}`,
-          date: data.date,
-          weight: Math.round(data.weight * 10) / 10,
-          bodyFat: data.bodyFat ? Math.round(data.bodyFat * 10) / 10 : undefined,
-          muscleMass: data.leanMass ? Math.round(data.leanMass * 10) / 10 : undefined,
-        });
-      }
-    });
-
-    // Sort by date (oldest first)
-    records.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-    return records;
+  // Save sync token to localStorage
+  const saveSyncToken = (token: string) => {
+    setSyncToken(token);
+    localStorage.setItem('fitnessSyncToken', token);
   };
 
-  const handleFileImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  // Sync from iOS app via API
+  const syncFromiOS = async () => {
+    if (!syncToken) {
+      setImportStatus('Please set your sync token first');
+      setShowSyncSettings(true);
+      return;
+    }
 
-    setIsImporting(true);
-    setImportStatus('Reading file...');
+    setIsSyncing(true);
+    setImportStatus('Syncing from iOS...');
 
     try {
-      const records = await parseAppleHealthExport(file);
+      const response = await fetch(`/api/sync?token=${encodeURIComponent(syncToken)}`);
+      const data = await response.json();
 
-      if (records.length === 0) {
-        setImportStatus('No new weight records found in file.');
-      } else {
-        // Add all records
-        records.forEach((record) => {
-          onAdd(record);
+      if (!response.ok) {
+        throw new Error(data.error || 'Sync failed');
+      }
+
+      if (data.records && data.records.length > 0) {
+        const existingDates = new Set(scaleData.map(d => format(d.date, 'yyyy-MM-dd')));
+        let addedCount = 0;
+
+        data.records.forEach((record: any) => {
+          const recordDate = new Date(record.date);
+          const dateKey = format(recordDate, 'yyyy-MM-dd');
+
+          if (!existingDates.has(dateKey)) {
+            onAdd({
+              id: record.id || `ios-${dateKey}-${Date.now()}`,
+              date: recordDate,
+              weight: record.weight,
+              bodyFat: record.bodyFat,
+              muscleMass: record.leanMass || record.muscleMass,
+            });
+            existingDates.add(dateKey);
+            addedCount++;
+          }
         });
-        setImportStatus(`Successfully imported ${records.length} weight record${records.length > 1 ? 's' : ''}.`);
+
+        if (addedCount > 0) {
+          setImportStatus(`Successfully synced ${addedCount} new record${addedCount > 1 ? 's' : ''} from iOS`);
+        } else {
+          setImportStatus('No new records to sync');
+        }
+      } else {
+        setImportStatus('No records found. Open the iOS app and sync first.');
       }
     } catch (error) {
-      console.error('Import error:', error);
+      console.error('Sync error:', error);
       if (error instanceof Error) {
-        setImportStatus(`Import failed: ${error.message}`);
+        setImportStatus(`Sync failed: ${error.message}`);
       } else {
-        setImportStatus('Import failed. Please check the file format.');
+        setImportStatus('Sync failed. Please try again.');
       }
     } finally {
-      setIsImporting(false);
-      // Reset file input
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+      setIsSyncing(false);
     }
   };
 
@@ -230,20 +145,19 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
         <h2 className="text-3xl font-bold">Smart Scale</h2>
         <div className="flex gap-2 flex-wrap">
           <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isImporting}
-            className={`btn-secondary flex items-center gap-2 ${isImporting ? 'opacity-50' : ''}`}
+            onClick={syncFromiOS}
+            disabled={isSyncing}
+            className={`btn-secondary flex items-center gap-2 ${isSyncing ? 'opacity-50' : ''}`}
           >
-            <Upload size={20} className={isImporting ? 'animate-pulse' : ''} />
-            {isImporting ? 'Importing...' : 'Import from Apple Health'}
+            <RefreshCw size={20} className={isSyncing ? 'animate-spin' : ''} />
+            {isSyncing ? 'Syncing...' : 'Sync from iOS'}
           </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xml"
-            onChange={handleFileImport}
-            className="hidden"
-          />
+          <button
+            onClick={() => setShowSyncSettings(!showSyncSettings)}
+            className="btn-secondary flex items-center gap-2"
+          >
+            <Settings size={20} />
+          </button>
           <button
             onClick={() => setShowManualForm(!showManualForm)}
             className="btn-primary flex items-center gap-2"
@@ -257,19 +171,47 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
       <div className="card bg-gradient-to-br from-dark-50 to-dark-100">
         <div className="flex items-start gap-4">
           <div className="bg-primary/10 p-3 rounded-lg">
-            <FileText className="text-primary" size={32} />
+            <Smartphone className="text-primary" size={32} />
           </div>
           <div>
-            <h3 className="text-lg font-bold mb-2">Import from Apple Health</h3>
+            <h3 className="text-lg font-bold mb-2">iOS App Sync</h3>
             <p className="text-gray-400 text-sm mb-2">
-              Import your weight data from Apple Health export. Your Fitdays app syncs data to Apple Health automatically.
+              Automatically sync weight data from Apple Health using the companion iOS app.
             </p>
             <p className="text-gray-500 text-xs">
-              To export: Open Health app → Profile → Export All Health Data → Save the export.xml file → Import here.
+              1. Install the FitnessSync iOS app → 2. Grant Health access → 3. Set same sync token in both apps → 4. Tap Sync
             </p>
           </div>
         </div>
       </div>
+
+      {/* Sync Settings Modal */}
+      {showSyncSettings && (
+        <div className="card border-primary/50">
+          <h3 className="text-lg font-bold mb-4">Sync Settings</h3>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">Sync Token</label>
+              <input
+                type="text"
+                value={syncToken}
+                onChange={(e) => saveSyncToken(e.target.value)}
+                placeholder="Enter a unique token (e.g., my-fitness-2024)"
+                className="input-field w-full"
+              />
+              <p className="text-gray-500 text-xs mt-1">
+                Use the same token in your iOS app settings to link them.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowSyncSettings(false)}
+              className="btn-primary w-full"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Import Status Display */}
       {importStatus && (
