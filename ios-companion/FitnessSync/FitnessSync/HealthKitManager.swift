@@ -8,124 +8,95 @@ struct WeightRecord: Codable, Identifiable {
     let weight: Double
     let bodyFat: Double?
     let leanMass: Double?
-
-    enum CodingKeys: String, CodingKey {
-        case id, date, weight, bodyFat, leanMass
-    }
 }
 
 class HealthKitManager: ObservableObject {
     private let healthStore = HKHealthStore()
 
-    @Published var isAuthorized = false
     @Published var weightRecords: [WeightRecord] = []
-    @Published var lastSyncDate: Date?
     @Published var syncStatus: String = ""
     @Published var isSyncing = false
 
-    private let apiBaseURL: String
-
-    init() {
-        // Load API URL from UserDefaults or use default
-        self.apiBaseURL = UserDefaults.standard.string(forKey: "apiBaseURL") ?? ""
-        // Load last sync date
-        if let lastSync = UserDefaults.standard.object(forKey: "lastSyncDate") as? Date {
-            self.lastSyncDate = lastSync
-        }
-    }
+    init() {}
 
     func setAPIBaseURL(_ url: String) {
         UserDefaults.standard.set(url, forKey: "apiBaseURL")
     }
 
     func getAPIBaseURL() -> String {
-        return UserDefaults.standard.string(forKey: "apiBaseURL") ?? ""
+        UserDefaults.standard.string(forKey: "apiBaseURL") ?? ""
     }
 
-    func requestAuthorization() async -> Bool {
-        guard HKHealthStore.isHealthDataAvailable() else {
-            return false
-        }
-
-        let readTypes: Set<HKObjectType> = [
-            HKObjectType.quantityType(forIdentifier: .bodyMass)!,
-            HKObjectType.quantityType(forIdentifier: .bodyFatPercentage)!,
-            HKObjectType.quantityType(forIdentifier: .leanBodyMass)!
-        ]
-
-        do {
-            try await healthStore.requestAuthorization(toShare: [], read: readTypes)
-            DispatchQueue.main.async {
-                self.isAuthorized = true
-            }
-            return true
-        } catch {
-            print("HealthKit authorization failed: \(error)")
-            return false
-        }
+    func setSyncToken(_ token: String) {
+        UserDefaults.standard.set(token, forKey: "syncToken")
     }
 
-    func fetchWeightData(from startDate: Date? = nil) async {
-        guard isAuthorized else { return }
+    func getSyncToken() -> String {
+        UserDefaults.standard.string(forKey: "syncToken") ?? ""
+    }
 
+    func fetchWeightData() async {
         let weightType = HKQuantityType.quantityType(forIdentifier: .bodyMass)!
         let bodyFatType = HKQuantityType.quantityType(forIdentifier: .bodyFatPercentage)!
         let leanMassType = HKQuantityType.quantityType(forIdentifier: .leanBodyMass)!
 
-        // Default to last 30 days if no start date provided
-        let queryStartDate = startDate ?? Calendar.current.date(byAdding: .day, value: -30, to: Date())!
+        // Request authorization
+        let readTypes: Set<HKObjectType> = [weightType, bodyFatType, leanMassType]
 
-        let predicate = HKQuery.predicateForSamples(
-            withStart: queryStartDate,
-            end: Date(),
-            options: .strictStartDate
-        )
+        do {
+            try await healthStore.requestAuthorization(toShare: [], read: readTypes)
+        } catch {
+            DispatchQueue.main.async {
+                self.syncStatus = "Health access denied"
+            }
+            return
+        }
 
-        // Fetch weight samples
+        // Fetch last 90 days
+        let startDate = Calendar.current.date(byAdding: .day, value: -90, to: Date())!
+        let predicate = HKQuery.predicateForSamples(withStart: startDate, end: Date(), options: .strictStartDate)
+
+        // Fetch samples
         let weightSamples = await fetchSamples(type: weightType, predicate: predicate)
         let bodyFatSamples = await fetchSamples(type: bodyFatType, predicate: predicate)
         let leanMassSamples = await fetchSamples(type: leanMassType, predicate: predicate)
 
         // Group by date
         var recordsByDate: [String: WeightRecord] = [:]
-        let dateFormatter = ISO8601DateFormatter()
 
         for sample in weightSamples {
             let dateKey = formatDateKey(sample.startDate)
             let weightKg = sample.quantity.doubleValue(for: .gramUnit(with: .kilo))
 
-            let existing = recordsByDate[dateKey]
-            if existing == nil || sample.startDate > existing!.date {
+            if recordsByDate[dateKey] == nil || sample.startDate > recordsByDate[dateKey]!.date {
                 recordsByDate[dateKey] = WeightRecord(
-                    id: "ios-\(dateKey)-\(Int(Date().timeIntervalSince1970 * 1000))",
+                    id: "ios-\(dateKey)",
                     date: sample.startDate,
                     weight: round(weightKg * 10) / 10,
-                    bodyFat: existing?.bodyFat,
-                    leanMass: existing?.leanMass
+                    bodyFat: nil,
+                    leanMass: nil
                 )
             }
         }
 
-        // Add body fat data
         for sample in bodyFatSamples {
             let dateKey = formatDateKey(sample.startDate)
-            let bodyFatPercent = sample.quantity.doubleValue(for: .percent()) * 100
+            let bodyFat = sample.quantity.doubleValue(for: .percent()) * 100
 
             if var record = recordsByDate[dateKey] {
                 recordsByDate[dateKey] = WeightRecord(
                     id: record.id,
                     date: record.date,
                     weight: record.weight,
-                    bodyFat: round(bodyFatPercent * 10) / 10,
+                    bodyFat: round(bodyFat * 10) / 10,
                     leanMass: record.leanMass
                 )
             }
         }
 
-        // Add lean mass data
         for sample in leanMassSamples {
             let dateKey = formatDateKey(sample.startDate)
-            let leanMassKg = sample.quantity.doubleValue(for: .gramUnit(with: .kilo))
+            let leanMass = sample.quantity.doubleValue(for: .gramUnit(with: .kilo))
 
             if var record = recordsByDate[dateKey] {
                 recordsByDate[dateKey] = WeightRecord(
@@ -133,7 +104,7 @@ class HealthKitManager: ObservableObject {
                     date: record.date,
                     weight: record.weight,
                     bodyFat: record.bodyFat,
-                    leanMass: round(leanMassKg * 10) / 10
+                    leanMass: round(leanMass * 10) / 10
                 )
             }
         }
@@ -142,22 +113,18 @@ class HealthKitManager: ObservableObject {
 
         DispatchQueue.main.async {
             self.weightRecords = records
+            self.syncStatus = "Found \(records.count) records"
         }
     }
 
     private func fetchSamples(type: HKQuantityType, predicate: NSPredicate) async -> [HKQuantitySample] {
-        return await withCheckedContinuation { continuation in
+        await withCheckedContinuation { continuation in
             let query = HKSampleQuery(
                 sampleType: type,
                 predicate: predicate,
                 limit: HKObjectQueryNoLimit,
                 sortDescriptors: [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
-            ) { _, samples, error in
-                if let error = error {
-                    print("Error fetching \(type): \(error)")
-                    continuation.resume(returning: [])
-                    return
-                }
+            ) { _, samples, _ in
                 continuation.resume(returning: samples as? [HKQuantitySample] ?? [])
             }
             healthStore.execute(query)
@@ -179,9 +146,18 @@ class HealthKitManager: ObservableObject {
         }
 
         let apiURL = getAPIBaseURL()
+        let token = getSyncToken()
+
         guard !apiURL.isEmpty else {
             DispatchQueue.main.async {
-                self.syncStatus = "Please set your API URL first"
+                self.syncStatus = "Set API URL in Settings"
+            }
+            return
+        }
+
+        guard !token.isEmpty else {
+            DispatchQueue.main.async {
+                self.syncStatus = "Set sync token in Settings"
             }
             return
         }
@@ -192,7 +168,7 @@ class HealthKitManager: ObservableObject {
         }
 
         do {
-            guard let url = URL(string: "\(apiURL)/api/sync") else {
+            guard let url = URL(string: "\(apiURL)/api/sync?token=\(token)") else {
                 throw URLError(.badURL)
             }
 
@@ -204,25 +180,18 @@ class HealthKitManager: ObservableObject {
             encoder.dateEncodingStrategy = .iso8601
             request.httpBody = try encoder.encode(weightRecords)
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await URLSession.shared.data(for: request)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                 throw URLError(.badServerResponse)
             }
 
-            if httpResponse.statusCode == 200 {
-                DispatchQueue.main.async {
-                    self.syncStatus = "Successfully synced \(self.weightRecords.count) records"
-                    self.lastSyncDate = Date()
-                    UserDefaults.standard.set(Date(), forKey: "lastSyncDate")
-                }
-            } else {
-                let errorMessage = String(data: data, encoding: .utf8) ?? "Unknown error"
-                throw NSError(domain: "", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: errorMessage])
+            DispatchQueue.main.async {
+                self.syncStatus = "Success! \(self.weightRecords.count) synced"
             }
         } catch {
             DispatchQueue.main.async {
-                self.syncStatus = "Sync failed: \(error.localizedDescription)"
+                self.syncStatus = "Failed: \(error.localizedDescription)"
             }
         }
 

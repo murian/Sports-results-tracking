@@ -2,172 +2,101 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var healthKitManager: HealthKitManager
-    @State private var apiURL: String = ""
     @State private var showSettings = false
 
     var body: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                // Header
-                VStack(spacing: 8) {
-                    Image(systemName: "heart.fill")
-                        .font(.system(size: 60))
-                        .foregroundColor(.yellow)
+        VStack(spacing: 20) {
+            // Header
+            VStack(spacing: 8) {
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 50))
+                    .foregroundColor(.yellow)
 
-                    Text("Fitness Sync")
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
+                Text("Fitness Sync")
+                    .font(.title)
+                    .fontWeight(.bold)
+            }
+            .padding(.top, 30)
 
-                    Text("Sync Apple Health to your Fitness Tracker")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.top, 40)
+            Spacer()
 
-                Spacer()
-
-                // Authorization Status
-                if !healthKitManager.isAuthorized {
-                    VStack(spacing: 16) {
-                        Image(systemName: "lock.shield")
-                            .font(.system(size: 40))
-                            .foregroundColor(.orange)
-
-                        Text("Health Access Required")
+            // Main Content
+            VStack(spacing: 16) {
+                // Records count
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text("Weight Records")
                             .font(.headline)
-
-                        Text("Allow access to read your weight and body composition data from Apple Health.")
+                        Text("\(healthKitManager.weightRecords.count) ready to sync")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-
-                        Button(action: {
-                            Task {
-                                await healthKitManager.requestAuthorization()
-                            }
-                        }) {
-                            Label("Grant Access", systemImage: "checkmark.shield")
-                                .font(.headline)
-                                .foregroundColor(.black)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(Color.yellow)
-                                .cornerRadius(12)
-                        }
-                        .padding(.horizontal)
                     }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(16)
-                    .padding(.horizontal)
-                } else {
-                    // Sync Controls
-                    VStack(spacing: 16) {
-                        // Records count
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text("Weight Records")
-                                    .font(.headline)
-                                Text("\(healthKitManager.weightRecords.count) records ready to sync")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "scalemass.fill")
-                                .font(.title)
-                                .foregroundColor(.yellow)
-                        }
+                    Spacer()
+                    Image(systemName: "scalemass.fill")
+                        .font(.title2)
+                        .foregroundColor(.yellow)
+                }
+                .padding()
+                .background(Color(.systemGray6))
+                .cornerRadius(12)
+
+                // Status
+                if !healthKitManager.syncStatus.isEmpty {
+                    Text(healthKitManager.syncStatus)
+                        .font(.caption)
+                        .foregroundColor(healthKitManager.syncStatus.contains("Success") ? .green : .orange)
+                }
+
+                // Fetch Button
+                Button {
+                    Task { await healthKitManager.fetchWeightData() }
+                } label: {
+                    Label("Fetch from Health", systemImage: "arrow.down.heart")
+                        .frame(maxWidth: .infinity)
                         .padding()
-                        .background(Color(.systemGray6))
+                        .background(Color.blue)
+                        .foregroundColor(.white)
                         .cornerRadius(12)
+                }
 
-                        // Last sync
-                        if let lastSync = healthKitManager.lastSyncDate {
-                            HStack {
-                                Image(systemName: "clock")
-                                    .foregroundColor(.secondary)
-                                Text("Last sync: \(lastSync, formatter: dateFormatter)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-
-                        // Sync status
-                        if !healthKitManager.syncStatus.isEmpty {
-                            Text(healthKitManager.syncStatus)
-                                .font(.subheadline)
-                                .foregroundColor(healthKitManager.syncStatus.contains("Successfully") ? .green : .orange)
-                                .multilineTextAlignment(.center)
-                        }
-
-                        // Fetch Button
-                        Button(action: {
-                            Task {
-                                await healthKitManager.fetchWeightData()
-                            }
-                        }) {
-                            Label("Fetch from Health", systemImage: "arrow.down.heart")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(Color.blue)
-                                .cornerRadius(12)
-                        }
-
-                        // Sync Button
-                        Button(action: {
-                            Task {
-                                await healthKitManager.syncToServer()
-                            }
-                        }) {
-                            if healthKitManager.isSyncing {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle(tint: .black))
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .background(Color.yellow)
-                                    .cornerRadius(12)
-                            } else {
-                                Label("Sync to Fitness Tracker", systemImage: "arrow.triangle.2.circlepath")
-                                    .font(.headline)
-                                    .foregroundColor(.black)
-                                    .frame(maxWidth: .infinity)
-                                    .padding()
-                                    .background(Color.yellow)
-                                    .cornerRadius(12)
-                            }
-                        }
-                        .disabled(healthKitManager.isSyncing || healthKitManager.weightRecords.isEmpty)
+                // Sync Button
+                Button {
+                    Task { await healthKitManager.syncToServer() }
+                } label: {
+                    if healthKitManager.isSyncing {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.yellow)
+                            .cornerRadius(12)
+                    } else {
+                        Label("Sync to Tracker", systemImage: "arrow.up.circle")
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.yellow)
+                            .foregroundColor(.black)
+                            .cornerRadius(12)
                     }
-                    .padding(.horizontal)
                 }
-
-                Spacer()
-
-                // Settings button
-                Button(action: { showSettings = true }) {
-                    Label("Settings", systemImage: "gear")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.bottom)
+                .disabled(healthKitManager.isSyncing || healthKitManager.weightRecords.isEmpty)
             }
-            .navigationBarHidden(true)
-            .sheet(isPresented: $showSettings) {
-                SettingsView()
-                    .environmentObject(healthKitManager)
+            .padding(.horizontal)
+
+            Spacer()
+
+            // Settings
+            Button { showSettings = true } label: {
+                Label("Settings", systemImage: "gear")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
             }
+            .padding(.bottom)
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+                .environmentObject(healthKitManager)
         }
         .preferredColorScheme(.dark)
-    }
-
-    private var dateFormatter: DateFormatter {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter
     }
 }
 
@@ -175,53 +104,42 @@ struct SettingsView: View {
     @EnvironmentObject var healthKitManager: HealthKitManager
     @Environment(\.dismiss) var dismiss
     @State private var apiURL: String = ""
+    @State private var syncToken: String = ""
 
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("API Configuration")) {
-                    TextField("Your Fitness Tracker URL", text: $apiURL)
-                        .textContentType(.URL)
+                Section(header: Text("Sync Configuration")) {
+                    TextField("API URL", text: $apiURL)
                         .autocapitalization(.none)
                         .keyboardType(.URL)
 
-                    Text("Enter your deployed Vercel app URL (e.g., https://your-app.vercel.app)")
+                    TextField("Sync Token", text: $syncToken)
+                        .autocapitalization(.none)
+
+                    Text("Use same token in web app")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                }
-
-                Section(header: Text("About")) {
-                    HStack {
-                        Text("Version")
-                        Spacer()
-                        Text("1.0.0")
-                            .foregroundColor(.secondary)
-                    }
                 }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         healthKitManager.setAPIBaseURL(apiURL)
+                        healthKitManager.setSyncToken(syncToken)
                         dismiss()
                     }
                 }
             }
             .onAppear {
                 apiURL = healthKitManager.getAPIBaseURL()
+                syncToken = healthKitManager.getSyncToken()
             }
         }
     }
-}
-
-#Preview {
-    ContentView()
-        .environmentObject(HealthKitManager())
 }
