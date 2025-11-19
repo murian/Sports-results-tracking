@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Plus, Trash2, Calendar, Activity, Bluetooth } from 'lucide-react';
+import { useState, useRef } from 'react';
+import { Plus, Trash2, Calendar, Upload, FileText } from 'lucide-react';
 import type { SmartScaleData } from '../types';
 import { format } from 'date-fns';
 
@@ -9,22 +9,11 @@ interface SmartScaleProps {
   onDelete: (id: string) => void;
 }
 
-// Standard Bluetooth service UUIDs for scales
-const WEIGHT_SCALE_SERVICE = 0x181D;
-const BODY_COMPOSITION_SERVICE = 0x181B;
-const WEIGHT_MEASUREMENT_CHAR = 0x2A9D;
-const BODY_COMPOSITION_MEASUREMENT_CHAR = 0x2A9C;
-
-// Chipsea-specific UUIDs
-const CHIPSEA_SERVICE = 0xFFF0;
-const CHIPSEA_NOTIFY_CHAR = 0xFFF4;
-const CHIPSEA_WRITE_CHAR = 0xFFF1;
-
 export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScaleProps) {
-  const [isScanning, setIsScanning] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
-  const [lastWeight, setLastWeight] = useState<number | null>(null);
-  const [scanStatus, setScanStatus] = useState<string>('');
+  const [importStatus, setImportStatus] = useState<string>('');
+  const [isImporting, setIsImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [formData, setFormData] = useState({
     date: format(new Date(), 'yyyy-MM-dd'),
     weight: '',
@@ -38,215 +27,163 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
     proteinPercentage: '',
   });
 
-  // Parse weight from characteristic data
-  const parseWeightData = (dataView: DataView): number | null => {
-    const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
-    console.log('Received data:', Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' '));
+  // Parse Apple Health export XML for weight data
+  const parseAppleHealthExport = async (file: File): Promise<SmartScaleData[]> => {
+    const text = await file.text();
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(text, 'text/xml');
 
-    // Standard Weight Measurement (0x2A9D) format
-    // Byte 0: Flags
-    // Bytes 1-2: Weight (little-endian)
-    if (bytes.length >= 3) {
-      const flags = bytes[0];
-      const weightRaw = bytes[1] | (bytes[2] << 8);
-
-      // Check unit flag (bit 0): 0 = kg, 1 = lb
-      const isImperial = (flags & 0x01) !== 0;
-      let weight = weightRaw * 0.005; // Resolution is 0.005 kg or 0.01 lb
-
-      if (isImperial) {
-        weight = weight * 0.453592; // Convert lb to kg
-      }
-
-      console.log(`Standard format: Raw=${weightRaw}, Weight=${weight.toFixed(2)} kg`);
-      if (weight > 0 && weight < 300) {
-        return weight;
-      }
+    // Check for parsing errors
+    const parseError = xmlDoc.querySelector('parsererror');
+    if (parseError) {
+      throw new Error('Invalid XML file. Please export your data from Apple Health.');
     }
 
-    // Chipsea format variations
-    if (bytes.length >= 2) {
-      // Try different parsing strategies
+    const records: SmartScaleData[] = [];
+    const existingDates = new Set(scaleData.map(d => format(d.date, 'yyyy-MM-dd')));
 
-      // Format 1: Weight as uint16 / 10
-      let weight = (bytes[0] | (bytes[1] << 8)) / 10;
-      if (weight > 20 && weight < 200) {
-        console.log(`Chipsea format 1: ${weight} kg`);
-        return weight;
-      }
+    // Find all weight records (HKQuantityTypeIdentifierBodyMass)
+    const weightRecords = xmlDoc.querySelectorAll('Record[type="HKQuantityTypeIdentifierBodyMass"]');
 
-      // Format 2: Weight as uint16 / 100
-      weight = (bytes[0] | (bytes[1] << 8)) / 100;
-      if (weight > 20 && weight < 200) {
-        console.log(`Chipsea format 2: ${weight} kg`);
-        return weight;
-      }
+    // Also check for body fat percentage
+    const bodyFatRecords = xmlDoc.querySelectorAll('Record[type="HKQuantityTypeIdentifierBodyFatPercentage"]');
+    const leanBodyMassRecords = xmlDoc.querySelectorAll('Record[type="HKQuantityTypeIdentifierLeanBodyMass"]');
 
-      // Format 3: Check bytes 4-5 for Chipsea with header
-      if (bytes.length >= 6) {
-        // Lenovo HS11 format: (((byte5 & 15) << 8) + byte6) * 0.1
-        weight = (((bytes[4] & 0x0F) << 8) + bytes[5]) * 0.1;
-        if (weight > 20 && weight < 200) {
-          console.log(`Chipsea HS11 format: ${weight} kg`);
-          return weight;
+    // Group records by date
+    const recordsByDate = new Map<string, {
+      weight?: number;
+      bodyFat?: number;
+      leanMass?: number;
+      date: Date;
+    }>();
+
+    // Process weight records
+    weightRecords.forEach((record) => {
+      const value = parseFloat(record.getAttribute('value') || '0');
+      const unit = record.getAttribute('unit') || 'kg';
+      const startDate = record.getAttribute('startDate') || '';
+
+      if (value > 0 && startDate) {
+        // Parse date (format: "2024-01-01 10:00:00 +0000")
+        const date = new Date(startDate);
+        const dateKey = format(date, 'yyyy-MM-dd');
+
+        // Convert to kg if needed
+        let weightKg = value;
+        if (unit === 'lb') {
+          weightKg = value * 0.453592;
+        }
+
+        // Keep the most recent reading for each day
+        const existing = recordsByDate.get(dateKey);
+        if (!existing || date > existing.date) {
+          recordsByDate.set(dateKey, {
+            ...existing,
+            weight: weightKg,
+            date,
+          });
         }
       }
+    });
 
-      // Fallback: scan all byte pairs
-      for (let i = 0; i < bytes.length - 1; i++) {
-        weight = (bytes[i] | (bytes[i + 1] << 8)) / 10;
-        if (weight >= 30 && weight <= 150) {
-          console.log(`Fallback at position ${i}: ${weight} kg`);
-          return weight;
+    // Process body fat records
+    bodyFatRecords.forEach((record) => {
+      const value = parseFloat(record.getAttribute('value') || '0');
+      const startDate = record.getAttribute('startDate') || '';
+
+      if (value > 0 && startDate) {
+        const date = new Date(startDate);
+        const dateKey = format(date, 'yyyy-MM-dd');
+
+        // Body fat is stored as decimal (0.15 = 15%)
+        const bodyFatPercent = value < 1 ? value * 100 : value;
+
+        const existing = recordsByDate.get(dateKey);
+        if (existing) {
+          recordsByDate.set(dateKey, {
+            ...existing,
+            bodyFat: bodyFatPercent,
+          });
         }
       }
-    }
+    });
 
-    return null;
+    // Process lean body mass records
+    leanBodyMassRecords.forEach((record) => {
+      const value = parseFloat(record.getAttribute('value') || '0');
+      const unit = record.getAttribute('unit') || 'kg';
+      const startDate = record.getAttribute('startDate') || '';
+
+      if (value > 0 && startDate) {
+        const date = new Date(startDate);
+        const dateKey = format(date, 'yyyy-MM-dd');
+
+        let leanMassKg = value;
+        if (unit === 'lb') {
+          leanMassKg = value * 0.453592;
+        }
+
+        const existing = recordsByDate.get(dateKey);
+        if (existing) {
+          recordsByDate.set(dateKey, {
+            ...existing,
+            leanMass: leanMassKg,
+          });
+        }
+      }
+    });
+
+    // Convert to SmartScaleData format
+    recordsByDate.forEach((data, dateKey) => {
+      if (data.weight && !existingDates.has(dateKey)) {
+        records.push({
+          id: `apple-health-${dateKey}-${Date.now()}`,
+          date: data.date,
+          weight: Math.round(data.weight * 10) / 10,
+          bodyFat: data.bodyFat ? Math.round(data.bodyFat * 10) / 10 : undefined,
+          muscleMass: data.leanMass ? Math.round(data.leanMass * 10) / 10 : undefined,
+        });
+      }
+    });
+
+    // Sort by date (oldest first)
+    records.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    return records;
   };
 
-  const startScanning = async () => {
-    setIsScanning(true);
-    setScanStatus('Searching for scale...');
+  const handleFileImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsImporting(true);
+    setImportStatus('Reading file...');
 
     try {
-      // Check if Web Bluetooth is available
-      if (!navigator.bluetooth) {
-        alert('Web Bluetooth is not supported in this browser. Please use Chrome, Edge, or Opera.');
-        setIsScanning(false);
-        setScanStatus('');
-        return;
+      const records = await parseAppleHealthExport(file);
+
+      if (records.length === 0) {
+        setImportStatus('No new weight records found in file.');
+      } else {
+        // Add all records
+        records.forEach((record) => {
+          onAdd(record);
+        });
+        setImportStatus(`Successfully imported ${records.length} weight record${records.length > 1 ? 's' : ''}.`);
       }
-
-      console.log('Requesting Bluetooth device...');
-
-      // Request device with multiple service options
-      const device = await navigator.bluetooth.requestDevice({
-        // Accept all devices to show everything
-        acceptAllDevices: true,
-        // Request access to all possible scale services
-        optionalServices: [
-          WEIGHT_SCALE_SERVICE,
-          BODY_COMPOSITION_SERVICE,
-          CHIPSEA_SERVICE,
-          'generic_access',
-          'generic_attribute',
-        ],
-      });
-
-      console.log('Device selected:', device.name || device.id);
-      setScanStatus(`Connecting to ${device.name || 'scale'}...`);
-
-      // Connect to GATT server
-      const server = await device.gatt!.connect();
-      console.log('Connected to GATT server');
-
-      let weightFound = false;
-
-      // Try to find and subscribe to weight services
-      const tryService = async (serviceUuid: number, charUuid: number, serviceName: string) => {
-        try {
-          console.log(`Trying ${serviceName} service (0x${serviceUuid.toString(16)})...`);
-          const service = await server.getPrimaryService(serviceUuid);
-          const characteristic = await service.getCharacteristic(charUuid);
-
-          console.log(`Found ${serviceName} characteristic, subscribing to notifications...`);
-
-          characteristic.addEventListener('characteristicvaluechanged', (event: Event) => {
-            const target = event.target as unknown as { value?: DataView };
-            if (target.value) {
-              const weight = parseWeightData(target.value);
-              if (weight) {
-                setLastWeight(weight);
-                setScanStatus(`Weight: ${weight.toFixed(1)} kg`);
-                weightFound = true;
-              }
-            }
-          });
-
-          await characteristic.startNotifications();
-          console.log(`Subscribed to ${serviceName} notifications`);
-          setScanStatus('Connected! Step on your scale...');
-          return true;
-        } catch (e) {
-          console.log(`${serviceName} not available:`, e);
-          return false;
-        }
-      };
-
-      // Try standard Weight Scale service first
-      let connected = await tryService(WEIGHT_SCALE_SERVICE, WEIGHT_MEASUREMENT_CHAR, 'Weight Scale');
-
-      // Try Body Composition service
-      if (!connected) {
-        connected = await tryService(BODY_COMPOSITION_SERVICE, BODY_COMPOSITION_MEASUREMENT_CHAR, 'Body Composition');
-      }
-
-      // Try Chipsea service
-      if (!connected) {
-        connected = await tryService(CHIPSEA_SERVICE, CHIPSEA_NOTIFY_CHAR, 'Chipsea');
-      }
-
-      // If Chipsea service found, we may need to send init command
-      if (connected) {
-        try {
-          const service = await server.getPrimaryService(CHIPSEA_SERVICE);
-          const writeChar = await service.getCharacteristic(CHIPSEA_WRITE_CHAR);
-          // Send initialization command (common Chipsea init sequence)
-          const initCmd = new Uint8Array([0xFD, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-          await writeChar.writeValue(initCmd);
-          console.log('Sent Chipsea init command');
-        } catch (e) {
-          console.log('Chipsea write characteristic not available:', e);
-        }
-      }
-
-      if (!connected) {
-        console.log('No known scale services found.');
-        console.log('This scale may use a proprietary protocol not yet supported.');
-        console.log('Please use "Add Manually" to enter your scale data.');
-
-        setScanStatus('Connected but no weight service found. Use manual entry.');
-      }
-
-      // Auto-disconnect after 60 seconds
-      setTimeout(() => {
-        if (device.gatt?.connected) {
-          device.gatt.disconnect();
-          console.log('Disconnected from scale');
-        }
-        setIsScanning(false);
-        if (!weightFound) {
-          setScanStatus('Session ended. No weight detected.');
-        }
-      }, 60000);
-
     } catch (error) {
-      console.error('Bluetooth error:', error);
+      console.error('Import error:', error);
       if (error instanceof Error) {
-        if (error.name === 'NotFoundError') {
-          setScanStatus('No device selected');
-        } else if (error.name === 'SecurityError') {
-          alert('Bluetooth access denied. Make sure you are using HTTPS.');
-        } else {
-          alert(`Connection failed: ${error.message}`);
-        }
+        setImportStatus(`Import failed: ${error.message}`);
+      } else {
+        setImportStatus('Import failed. Please check the file format.');
       }
-      setIsScanning(false);
-      setScanStatus('');
-    }
-  };
-
-  const saveLastWeight = () => {
-    if (lastWeight) {
-      const data: SmartScaleData = {
-        id: Date.now().toString(),
-        date: new Date(),
-        weight: lastWeight,
-      };
-      onAdd(data);
-      setLastWeight(null);
-      setScanStatus('Weight saved!');
+    } finally {
+      setIsImporting(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
@@ -291,15 +228,22 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
     <div className="space-y-6">
       <div className="flex justify-between items-center flex-wrap gap-4">
         <h2 className="text-3xl font-bold">Smart Scale</h2>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <button
-            onClick={startScanning}
-            disabled={isScanning}
-            className={`btn-secondary flex items-center gap-2 ${isScanning ? 'bg-primary text-dark' : ''}`}
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isImporting}
+            className={`btn-secondary flex items-center gap-2 ${isImporting ? 'opacity-50' : ''}`}
           >
-            <Bluetooth size={20} className={isScanning ? 'animate-pulse' : ''} />
-            {isScanning ? 'Connected...' : 'Connect Scale'}
+            <Upload size={20} className={isImporting ? 'animate-pulse' : ''} />
+            {isImporting ? 'Importing...' : 'Import from Apple Health'}
           </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xml"
+            onChange={handleFileImport}
+            className="hidden"
+          />
           <button
             onClick={() => setShowManualForm(!showManualForm)}
             className="btn-primary flex items-center gap-2"
@@ -313,38 +257,24 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
       <div className="card bg-gradient-to-br from-dark-50 to-dark-100">
         <div className="flex items-start gap-4">
           <div className="bg-primary/10 p-3 rounded-lg">
-            <Activity className="text-primary" size={32} />
+            <FileText className="text-primary" size={32} />
           </div>
           <div>
-            <h3 className="text-lg font-bold mb-2">Bluetooth Smart Scale Integration</h3>
+            <h3 className="text-lg font-bold mb-2">Import from Apple Health</h3>
             <p className="text-gray-400 text-sm mb-2">
-              Connect to your Bluetooth smart scale to automatically sync weight data.
+              Import your weight data from Apple Health export. Your Fitdays app syncs data to Apple Health automatically.
             </p>
             <p className="text-gray-500 text-xs">
-              Works with Chrome, Edge, or Opera. Click "Connect Scale", select your device from the list, then step on the scale.
+              To export: Open Health app → Profile → Export All Health Data → Save the export.xml file → Import here.
             </p>
           </div>
         </div>
       </div>
 
-      {/* Scanning Status & Weight Display */}
-      {(scanStatus || lastWeight) && (
-        <div className="card border-primary/50">
-          <div className="text-center">
-            <h3 className="text-lg font-semibold mb-2">
-              {isScanning ? 'Scanning for Weight...' : 'Weight Reading'}
-            </h3>
-            {lastWeight ? (
-              <>
-                <p className="text-5xl font-bold text-primary mb-4">{lastWeight.toFixed(1)} kg</p>
-                <button onClick={saveLastWeight} className="btn-primary">
-                  Save This Weight
-                </button>
-              </>
-            ) : (
-              <p className="text-gray-400">{scanStatus}</p>
-            )}
-          </div>
+      {/* Import Status Display */}
+      {importStatus && (
+        <div className={`card border ${importStatus.includes('Successfully') ? 'border-green-500/50 bg-green-500/10' : importStatus.includes('failed') ? 'border-red-500/50 bg-red-500/10' : 'border-primary/50'}`}>
+          <p className="text-center">{importStatus}</p>
         </div>
       )}
 
