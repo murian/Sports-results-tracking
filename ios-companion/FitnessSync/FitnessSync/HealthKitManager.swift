@@ -28,7 +28,10 @@ class HealthKitManager: ObservableObject {
     init() {
         // Load API URL from UserDefaults or use default
         self.apiBaseURL = UserDefaults.standard.string(forKey: "apiBaseURL") ?? ""
-        checkAuthorization()
+        // Load last sync date
+        if let lastSync = UserDefaults.standard.object(forKey: "lastSyncDate") as? Date {
+            self.lastSyncDate = lastSync
+        }
     }
 
     func setAPIBaseURL(_ url: String) {
@@ -37,24 +40,6 @@ class HealthKitManager: ObservableObject {
 
     func getAPIBaseURL() -> String {
         return UserDefaults.standard.string(forKey: "apiBaseURL") ?? ""
-    }
-
-    private func checkAuthorization() {
-        guard HKHealthStore.isHealthDataAvailable() else {
-            return
-        }
-
-        let readTypes: Set<HKObjectType> = [
-            HKObjectType.quantityType(forIdentifier: .bodyMass)!,
-            HKObjectType.quantityType(forIdentifier: .bodyFatPercentage)!,
-            HKObjectType.quantityType(forIdentifier: .leanBodyMass)!
-        ]
-
-        healthStore.getRequestStatusForAuthorization(toShare: [], read: readTypes) { status, error in
-            DispatchQueue.main.async {
-                self.isAuthorized = (status == .unnecessary)
-            }
-        }
     }
 
     func requestAuthorization() async -> Bool {

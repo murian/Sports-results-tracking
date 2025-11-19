@@ -161,11 +161,6 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear {
-            Task {
-                await healthKitManager.fetchWeightData()
-            }
-        }
     }
 
     private var dateFormatter: DateFormatter {
