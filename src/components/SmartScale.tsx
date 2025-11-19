@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bluetooth, Plus, Trash2, Calendar, Activity } from 'lucide-react';
+import { Plus, Trash2, Calendar, Activity, Radio } from 'lucide-react';
 import type { SmartScaleData } from '../types';
 import { format } from 'date-fns';
 
@@ -9,11 +9,34 @@ interface SmartScaleProps {
   onDelete: (id: string) => void;
 }
 
+// Types for experimental BLE scanning API
+interface BluetoothLEScanOptions {
+  filters?: BluetoothLEScanFilter[];
+  keepRepeatedDevices?: boolean;
+  acceptAllAdvertisements?: boolean;
+}
+
+interface BluetoothLEScan {
+  stop(): void;
+}
+
+interface BluetoothAdvertisingEvent extends Event {
+  device: BluetoothDevice;
+  rssi: number;
+  manufacturerData?: Map<number, DataView>;
+  serviceData?: Map<string, DataView>;
+}
+
+// Extended Bluetooth interface with experimental scanning API
+interface BluetoothWithScanning extends Bluetooth {
+  requestLEScan?(options?: BluetoothLEScanOptions): Promise<BluetoothLEScan>;
+}
+
 export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScaleProps) {
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
   const [lastWeight, setLastWeight] = useState<number | null>(null);
+  const [scanStatus, setScanStatus] = useState<string>('');
   const [formData, setFormData] = useState({
     date: format(new Date(), 'yyyy-MM-dd'),
     weight: '',
@@ -27,152 +50,129 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
     proteinPercentage: '',
   });
 
-  // Chipsea/Fitdays scale service and characteristic UUIDs
-  const SCALE_SERVICE_UUID = '0000fff0-0000-1000-8000-00805f9b34fb';
-  const SCALE_NOTIFY_CHARACTERISTIC = '0000fff4-0000-1000-8000-00805f9b34fb';
+  // Parse weight from Chipsea scale advertisement data
+  const parseChipseaWeight = (manufacturerData: Map<number, DataView>): number | null => {
+    for (const [companyId, dataView] of manufacturerData) {
+      console.log(`Manufacturer ID: 0x${companyId.toString(16)}, Data:`, new Uint8Array(dataView.buffer));
 
-  const parseWeightData = (dataView: DataView): number | null => {
-    // Chipsea scales send weight data in different formats
-    // Common format: bytes contain weight in kg * 100 or * 10
-    try {
+      // Try to parse weight from manufacturer data
       if (dataView.byteLength >= 2) {
-        // Try different byte positions and formats
-        const byte0 = dataView.getUint8(0);
-        const byte1 = dataView.getUint8(1);
+        // Chipsea format: weight is often in bytes as (value * 100) in grams or kg
+        // Try different parsing strategies
 
-        // Check for stable measurement flag (often 0xCF or similar)
-        if (byte0 === 0xCF || byte0 === 0x10) {
-          // Weight is usually in bytes 3-4 or 4-5 as big-endian
-          if (dataView.byteLength >= 5) {
-            const weightRaw = dataView.getUint16(3, false); // Big-endian
-            return weightRaw / 100; // Convert to kg
+        // Strategy 1: Weight in bytes 0-1 (big endian) as kg * 100
+        let weight = dataView.getUint16(0, false) / 100;
+        if (weight > 20 && weight < 200) {
+          return weight;
+        }
+
+        // Strategy 2: Weight in bytes 0-1 (little endian) as kg * 100
+        weight = dataView.getUint16(0, true) / 100;
+        if (weight > 20 && weight < 200) {
+          return weight;
+        }
+
+        // Strategy 3: Look for weight in later bytes
+        if (dataView.byteLength >= 4) {
+          weight = dataView.getUint16(2, false) / 100;
+          if (weight > 20 && weight < 200) {
+            return weight;
+          }
+          weight = dataView.getUint16(2, true) / 100;
+          if (weight > 20 && weight < 200) {
+            return weight;
           }
         }
 
-        // Alternative: weight in first two bytes
-        const weightRaw = (byte0 << 8) | byte1;
-        if (weightRaw > 0 && weightRaw < 30000) { // Reasonable weight range
-          return weightRaw / 100;
+        // Strategy 4: Weight as grams in bytes 0-1
+        weight = dataView.getUint16(0, true) / 1000;
+        if (weight > 20 && weight < 200) {
+          return weight;
         }
       }
-    } catch (e) {
-      console.error('Error parsing weight data:', e);
     }
     return null;
   };
 
-  const connectToScale = async () => {
-    setIsConnecting(true);
+  const startScanning = async () => {
+    setIsScanning(true);
+    setScanStatus('Initializing...');
+
     try {
-      // Check if Web Bluetooth is available
-      if (!('bluetooth' in navigator)) {
-        const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
+      // Cast to extended type for experimental scanning API
+      const bluetooth = navigator.bluetooth as BluetoothWithScanning;
 
-        let message = 'Web Bluetooth is not available.\n\n';
-
-        if (!isSecure) {
-          message += 'Reason: This page must be served over HTTPS.\n\n';
-        } else {
-          message += 'Possible reasons:\n';
-          message += '• Safari and iOS browsers do not support Web Bluetooth\n';
-          message += '• You may need to enable Bluetooth in browser settings\n\n';
-          message += 'For Chrome/Edge/Opera on macOS:\n';
-          message += '1. Go to chrome://flags (or edge://flags)\n';
-          message += '2. Search for "Web Bluetooth"\n';
-          message += '3. Enable the feature and restart browser\n\n';
-        }
-
-        message += 'Alternative: Use "Add Manually" to enter your scale data.';
-
-        alert(message);
-        setIsConnecting(false);
+      // Check if Web Bluetooth Scanning is available
+      if (!bluetooth?.requestLEScan) {
+        alert(
+          'BLE Scanning is not available in your browser.\n\n' +
+          'To enable it in Chrome:\n' +
+          '1. Go to chrome://flags\n' +
+          '2. Search for "Experimental Web Platform features"\n' +
+          '3. Enable it and restart Chrome\n\n' +
+          'Alternative: Use "Add Manually" to enter your scale data.'
+        );
+        setIsScanning(false);
+        setScanStatus('');
         return;
       }
 
-      // Request Bluetooth device - show all devices for Fitdays/Chipsea scales
-      // These scales often have generic names like "Electronic Scale" or "Chipsea-BLE"
-      const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: [
-          SCALE_SERVICE_UUID,
-          '0000ffe0-0000-1000-8000-00805f9b34fb', // Alternative service
-          '0000181d-0000-1000-8000-00805f9b34fb', // Weight Scale
-          '0000181b-0000-1000-8000-00805f9b34fb', // Body Composition
-        ]
+      setScanStatus('Requesting permission...');
+
+      // Request BLE scan - accept all advertisements
+      const scan = await bluetooth.requestLEScan({
+        acceptAllAdvertisements: true,
       });
 
-      console.log('Selected device:', device.name);
+      setScanStatus('Scanning... Step on your scale now!');
 
-      // Connect to GATT server
-      const server = await device.gatt?.connect();
-      if (!server) {
-        throw new Error('Failed to connect to GATT server');
-      }
+      // Listen for advertisement events
+      const handleAdvertisement = (event: Event) => {
+        const advEvent = event as BluetoothAdvertisingEvent;
+        const device = advEvent.device;
 
-      // Try to get the scale service
-      let service;
-      try {
-        service = await server.getPrimaryService(SCALE_SERVICE_UUID);
-      } catch {
-        // Try alternative service UUIDs
-        try {
-          service = await server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb');
-        } catch {
-          throw new Error('Scale service not found. This device may not be a compatible scale.');
+        // Log all devices for debugging
+        if (device.name || advEvent.manufacturerData?.size) {
+          console.log('Device found:', device.name || device.id, advEvent);
         }
-      }
 
-      // Get the notify characteristic to receive weight data
-      let notifyCharacteristic;
-      try {
-        notifyCharacteristic = await service.getCharacteristic(SCALE_NOTIFY_CHARACTERISTIC);
-      } catch {
-        // Try alternative characteristic
-        try {
-          notifyCharacteristic = await service.getCharacteristic('0000fff1-0000-1000-8000-00805f9b34fb');
-        } catch {
-          throw new Error('Weight characteristic not found.');
-        }
-      }
-
-      // Start notifications to receive weight data
-      await notifyCharacteristic.startNotifications();
-
-      notifyCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
-        const target = event.target as unknown as { value: DataView };
-        if (target?.value) {
-          console.log('Received data:', new Uint8Array(target.value.buffer));
-          const weight = parseWeightData(target.value);
-          if (weight && weight > 0 && weight < 300) {
+        // Check for Chipsea/CHWARES scale
+        // These scales often have no name or generic names
+        if (advEvent.manufacturerData && advEvent.manufacturerData.size > 0) {
+          const weight = parseChipseaWeight(advEvent.manufacturerData);
+          if (weight) {
             setLastWeight(weight);
-            console.log('Weight:', weight, 'kg');
+            setScanStatus(`Weight detected: ${weight.toFixed(1)} kg`);
+            console.log('Weight from advertisement:', weight);
           }
         }
-      });
+      };
 
-      setIsConnected(true);
-      alert(`Connected to ${device.name || 'scale'}!\n\nStep on the scale to measure. The weight will appear on screen.`);
+      (bluetooth as unknown as EventTarget).addEventListener('advertisementreceived', handleAdvertisement);
 
-      // Listen for disconnection
-      device.addEventListener('gattserverdisconnected', () => {
-        setIsConnected(false);
-        setLastWeight(null);
-        alert('Disconnected from smart scale');
-      });
+      // Stop scanning after 30 seconds
+      setTimeout(() => {
+        scan.stop();
+        (bluetooth as unknown as EventTarget).removeEventListener('advertisementreceived', handleAdvertisement);
+        setIsScanning(false);
+        if (!lastWeight) {
+          setScanStatus('Scan complete. No weight detected.');
+        }
+      }, 30000);
 
     } catch (error) {
-      console.error('Bluetooth connection error:', error);
+      console.error('Scanning error:', error);
       if (error instanceof Error) {
-        if (error.name === 'NotFoundError') {
-          alert('No Bluetooth device selected. Please try again.');
-        } else if (error.name === 'SecurityError') {
-          alert('Bluetooth access denied. Please ensure:\n\n1. Site is served over HTTPS\n2. Browser has Bluetooth permission\n3. System Bluetooth is enabled');
+        if (error.name === 'NotAllowedError') {
+          alert('Permission denied. Please allow Bluetooth scanning when prompted.');
+        } else if (error.name === 'NotFoundError') {
+          alert('No Bluetooth adapter found. Make sure Bluetooth is enabled.');
         } else {
-          alert(`Failed to connect: ${error.message}\n\nTip: Make sure your scale is turned on (step on it briefly).`);
+          alert(`Scanning failed: ${error.message}`);
         }
       }
-    } finally {
-      setIsConnecting(false);
+      setIsScanning(false);
+      setScanStatus('');
     }
   };
 
@@ -185,7 +185,7 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
       };
       onAdd(data);
       setLastWeight(null);
-      alert(`Saved weight: ${lastWeight} kg`);
+      setScanStatus('Weight saved!');
     }
   };
 
@@ -232,12 +232,12 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
         <h2 className="text-3xl font-bold">Smart Scale</h2>
         <div className="flex gap-2">
           <button
-            onClick={connectToScale}
-            disabled={isConnecting || isConnected}
-            className={`btn-secondary flex items-center gap-2 ${isConnected ? 'bg-primary text-dark' : ''}`}
+            onClick={startScanning}
+            disabled={isScanning}
+            className={`btn-secondary flex items-center gap-2 ${isScanning ? 'bg-primary text-dark' : ''}`}
           >
-            <Bluetooth size={20} />
-            {isConnecting ? 'Connecting...' : isConnected ? 'Connected' : 'Connect Scale'}
+            <Radio size={20} className={isScanning ? 'animate-pulse' : ''} />
+            {isScanning ? 'Scanning...' : 'Scan for Scale'}
           </button>
           <button
             onClick={() => setShowManualForm(!showManualForm)}
@@ -257,20 +257,22 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
           <div>
             <h3 className="text-lg font-bold mb-2">Bluetooth Smart Scale Integration</h3>
             <p className="text-gray-400 text-sm mb-2">
-              Connect your Bluetooth-enabled smart scale to automatically sync your weight and body composition data.
+              Scan for CHWARES/Fitdays/Chipsea scales that broadcast weight via BLE advertisements.
             </p>
             <p className="text-gray-500 text-xs">
-              Supported: CHWARES/Fitdays scales, Chipsea-based scales. Use Chrome, Edge, or Opera with HTTPS.
+              Requires Chrome with "Experimental Web Platform features" enabled (chrome://flags). Step on your scale after clicking Scan.
             </p>
           </div>
         </div>
       </div>
 
-      {/* Live Weight Display */}
-      {isConnected && (
+      {/* Scanning Status & Weight Display */}
+      {(scanStatus || lastWeight) && (
         <div className="card border-primary/50">
           <div className="text-center">
-            <h3 className="text-lg font-semibold mb-2">Live Weight Reading</h3>
+            <h3 className="text-lg font-semibold mb-2">
+              {isScanning ? 'Scanning for Weight...' : 'Weight Reading'}
+            </h3>
             {lastWeight ? (
               <>
                 <p className="text-5xl font-bold text-primary mb-4">{lastWeight.toFixed(1)} kg</p>
@@ -279,7 +281,7 @@ export default function SmartScale({ scaleData, onAdd, onDelete }: SmartScalePro
                 </button>
               </>
             ) : (
-              <p className="text-gray-400">Step on your scale to see the weight...</p>
+              <p className="text-gray-400">{scanStatus}</p>
             )}
           </div>
         </div>
