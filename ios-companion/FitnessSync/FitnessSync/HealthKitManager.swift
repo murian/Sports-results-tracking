@@ -1,5 +1,6 @@
 import Foundation
 import HealthKit
+import Combine
 
 struct WeightRecord: Codable, Identifiable {
     let id: String
